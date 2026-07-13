@@ -29,11 +29,11 @@ jobs:
         run: |
           set -euo pipefail
           cat bootstrap/overlay.part-* | base64 --decode > "$RUNNER_TEMP/t3-agent-overlay.tar.xz"
-          echo "e8b3b4941a5c1d3b66c63ad741f30f1aa8c4a31642c374ae305cd805427e190a  $RUNNER_TEMP/t3-agent-overlay.tar.xz" | sha256sum --check --status
+          echo "f5871e03f448662276451af6b958c7021eb5e38b57f2fabdb6151a24f8eb8b6c  $RUNNER_TEMP/t3-agent-overlay.tar.xz" | sha256sum --check --status
           mkdir -p "$RUNNER_TEMP/overlay"
           tar -xJf "$RUNNER_TEMP/t3-agent-overlay.tar.xz" -C "$RUNNER_TEMP/overlay"
           test -d "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay"
-          test "$(find "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay" -type f | wc -l | tr -d ' ')" = "197"
+          test "$(find "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay" -type f | wc -l | tr -d ' ')" = "182"
 
       - name: Acquire and verify exact upstream baseline
         shell: bash
@@ -64,13 +64,66 @@ jobs:
             "upstreamRepository": "pingdotgg/t3code",
             "upstreamCommit": "c1ec1915fc16f3dc1ec5d47d9a97f6210a574526",
             "upstreamTree": "d821340c852d7c8372e208ccc540b7aa530af038",
-            "overlaySha256": "e8b3b4941a5c1d3b66c63ad741f30f1aa8c4a31642c374ae305cd805427e190a",
-            "overlayFileCount": 197,
-            "excludedDuplicate": "input/upstream_reference/reconstructed_runtime_source",
-            "exclusionReason": "The exact verified upstream source is committed at repository root; the sourcemap reconstruction was non-authoritative duplicate research material.",
+            "overlaySha256": "f5871e03f448662276451af6b958c7021eb5e38b57f2fabdb6151a24f8eb8b6c",
+            "overlayFileCount": 182,
+            "excludedRegenerableFiles": [
+              "input/upstream_reference/reconstructed_runtime_source",
+              "source/SOURCE_MANIFEST.json",
+              "source/SOURCE_MANIFEST.sha256",
+              "WORKSPACE_MANIFEST.json",
+              "GITHUB_OVERLAY_MANIFEST.json"
+            ],
+            "exclusionReason": "The exact verified upstream source is committed at repository root; large manifests are regenerated against the imported repository; sourcemap reconstruction was non-authoritative duplicate research material.",
             "importMode": "verified_upstream_history_plus_project_overlay"
           }
           JSON
+
+          python3 - "$UPSTREAM" <<'PY'
+          import hashlib, json, os, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          entries = []
+          raw = subprocess.check_output(["git", "-C", str(root), "ls-tree", "-rz", "c1ec1915fc16f3dc1ec5d47d9a97f6210a574526"])
+          for record in raw.split(b"\0"):
+              if not record:
+                  continue
+              meta, path_b = record.split(b"\t", 1)
+              mode, typ, sha = meta.decode().split()
+              path = path_b.decode("utf-8", "surrogateescape")
+              item = {"path": path, "mode": mode, "type": typ, "gitSha1": sha}
+              p = root / path
+              if typ == "blob" and mode == "120000":
+                  target = os.readlink(p)
+                  data = target.encode()
+                  item.update({"kind": "symlink", "target": target, "sha256": hashlib.sha256(data).hexdigest()})
+              elif typ == "blob":
+                  data = p.read_bytes()
+                  item.update({"kind": "file", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+              elif typ == "commit":
+                  item["kind"] = "gitlink"
+              entries.append(item)
+          manifest = {
+              "schemaVersion": 2,
+              "repository": "pingdotgg/t3code",
+              "commit": "c1ec1915fc16f3dc1ec5d47d9a97f6210a574526",
+              "tree": "d821340c852d7c8372e208ccc540b7aa530af038",
+              "entries": entries,
+          }
+          out = root / "project/source/SOURCE_MANIFEST.json"
+          out.parent.mkdir(parents=True, exist_ok=True)
+          payload = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+          out.write_bytes(payload)
+          (root / "project/source/SOURCE_MANIFEST.sha256").write_text(hashlib.sha256(payload).hexdigest() + "  SOURCE_MANIFEST.json\n")
+
+          project_files = []
+          for p in sorted((root / "project").rglob("*")):
+              if p.is_file():
+                  data = p.read_bytes()
+                  project_files.append({"path": p.relative_to(root).as_posix(), "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+          workspace = {"schemaVersion": 2, "files": project_files}
+          payload = json.dumps(workspace, indent=2, sort_keys=True).encode() + b"\n"
+          (root / "project/WORKSPACE_MANIFEST.json").write_bytes(payload)
+          PY
+
           git -C "$UPSTREAM" config user.name "T3 Agent Import"
           git -C "$UPSTREAM" config user.email "actions@users.noreply.github.com"
           git -C "$UPSTREAM" add project
