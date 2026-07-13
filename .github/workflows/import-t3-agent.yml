@@ -1,0 +1,93 @@
+name: Import T3 ChatGPT Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bootstrap/READY"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: t3-agent-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out bootstrap repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify project overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/overlay.part-* | base64 --decode > "$RUNNER_TEMP/t3-agent-overlay.tar.xz"
+          echo "e8b3b4941a5c1d3b66c63ad741f30f1aa8c4a31642c374ae305cd805427e190a  $RUNNER_TEMP/t3-agent-overlay.tar.xz" | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/overlay"
+          tar -xJf "$RUNNER_TEMP/t3-agent-overlay.tar.xz" -C "$RUNNER_TEMP/overlay"
+          test -d "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay"
+          test "$(find "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay" -type f | wc -l | tr -d ' ')" = "197"
+
+      - name: Acquire and verify exact upstream baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=c1ec1915fc16f3dc1ec5d47d9a97f6210a574526
+          TREE=d821340c852d7c8372e208ccc540b7aa530af038
+          git clone https://github.com/pingdotgg/t3code.git "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" cat-file -e "$SHA^{commit}"
+          git -C "$RUNNER_TEMP/upstream" checkout --detach "$SHA"
+          git -C "$RUNNER_TEMP/upstream" fsck --full --strict
+          test -z "$(git -C "$RUNNER_TEMP/upstream" status --porcelain)"
+          test "$(git -C "$RUNNER_TEMP/upstream" rev-parse "$SHA^{tree}")" = "$TREE"
+          git -C "$RUNNER_TEMP/upstream" switch -c build/t3-chatgpt-agent
+
+      - name: Add complete project checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM="$RUNNER_TEMP/upstream"
+          mkdir -p "$UPSTREAM/project"
+          cp -a "$RUNNER_TEMP/overlay/t3-agent-workspace-overlay/." "$UPSTREAM/project/"
+          mkdir -p "$UPSTREAM/project/provenance"
+          cat > "$UPSTREAM/project/provenance/GITHUB_IMPORT.json" <<'JSON'
+          {
+            "schemaVersion": 1,
+            "repository": "Chicken3veryDay/Agent---ChatGPT",
+            "upstreamRepository": "pingdotgg/t3code",
+            "upstreamCommit": "c1ec1915fc16f3dc1ec5d47d9a97f6210a574526",
+            "upstreamTree": "d821340c852d7c8372e208ccc540b7aa530af038",
+            "overlaySha256": "e8b3b4941a5c1d3b66c63ad741f30f1aa8c4a31642c374ae305cd805427e190a",
+            "overlayFileCount": 197,
+            "excludedDuplicate": "input/upstream_reference/reconstructed_runtime_source",
+            "exclusionReason": "The exact verified upstream source is committed at repository root; the sourcemap reconstruction was non-authoritative duplicate research material.",
+            "importMode": "verified_upstream_history_plus_project_overlay"
+          }
+          JSON
+          git -C "$UPSTREAM" config user.name "T3 Agent Import"
+          git -C "$UPSTREAM" config user.email "actions@users.noreply.github.com"
+          git -C "$UPSTREAM" add project
+          git -C "$UPSTREAM" commit -m "project: import complete verified S00 checkpoint and plans"
+          git -C "$UPSTREAM" tag -f upstream-baseline-c1ec1915fc16f3dc1ec5d47d9a97f6210a574526 c1ec1915fc16f3dc1ec5d47d9a97f6210a574526
+          git -C "$UPSTREAM" tag -f checkpoint-s00-baseline-in-progress HEAD
+          git -C "$UPSTREAM" fsck --full --strict
+          test -z "$(git -C "$UPSTREAM" status --porcelain)"
+
+      - name: Push dedicated repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          UPSTREAM="$RUNNER_TEMP/upstream"
+          gh auth setup-git
+          git -C "$UPSTREAM" remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$UPSTREAM" push --force origin HEAD:main HEAD:build/t3-chatgpt-agent
+          git -C "$UPSTREAM" push --force origin refs/tags/upstream-baseline-c1ec1915fc16f3dc1ec5d47d9a97f6210a574526 refs/tags/checkpoint-s00-baseline-in-progress
